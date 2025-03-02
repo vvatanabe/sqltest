@@ -2,10 +2,9 @@ package sqltest_test
 
 import (
 	"github.com/ory/dockertest/v3"
-	"testing"
-
 	"github.com/ory/dockertest/v3/docker"
 	"github.com/vvatanabe/sqltest"
+	"testing"
 )
 
 // TestDefaultMySQL demonstrates using NewMySQL with default options.
