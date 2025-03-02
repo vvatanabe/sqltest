@@ -4,14 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"github.com/go-sql-driver/mysql"
+	_ "github.com/lib/pq"
+	"github.com/ory/dockertest/v3"
+	"github.com/ory/dockertest/v3/docker"
 	"io"
 	"log"
 	"testing"
 	"time"
-
-	"github.com/go-sql-driver/mysql"
-	_ "github.com/lib/pq"
-	"github.com/ory/dockertest/v3"
 )
 
 func init() {
@@ -24,8 +24,9 @@ type RunOption func(*dockertest.RunOptions)
 
 // NewDockerDB starts a Docker container using the specified run options,
 // container port, driver name, and a function to generate the DSN.
+// Additionally, it accepts optional host configuration functions.
 // It returns a connected *sql.DB and a cleanup function.
-func NewDockerDB(t testing.TB, runOpts *dockertest.RunOptions, containerPort, driverName string, dsnFunc func(actualPort string) string) (*sql.DB, func()) {
+func NewDockerDB(t testing.TB, runOpts *dockertest.RunOptions, containerPort, driverName string, dsnFunc func(actualPort string) string, hostOpts ...func(*docker.HostConfig)) (*sql.DB, func()) {
 	t.Helper()
 
 	pool, err := dockertest.NewPool("")
@@ -33,7 +34,8 @@ func NewDockerDB(t testing.TB, runOpts *dockertest.RunOptions, containerPort, dr
 		t.Fatalf("failed to connect to docker: %s", err)
 	}
 
-	resource, err := pool.RunWithOptions(runOpts)
+	// Pass optional host configuration options.
+	resource, err := pool.RunWithOptions(runOpts, hostOpts...)
 	if err != nil {
 		t.Fatalf("failed to start %s container: %s", driverName, err)
 	}
@@ -72,15 +74,34 @@ func NewDockerDB(t testing.TB, runOpts *dockertest.RunOptions, containerPort, dr
 	return db, cleanup
 }
 
-// NewMySQL starts a MySQL container using Docker and returns a connected *sql.DB,
-// along with a cleanup function to remove the container after tests.
-// The 'tag' parameter specifies the MySQL version to use (e.g., "8.0").
-// Additional RunOption functions can be provided to override default settings.
-func NewMySQL(t testing.TB, tag string, opts ...RunOption) (*sql.DB, func()) {
+// NewMySQL starts a MySQL Docker container using the default settings and returns a connected *sql.DB
+// along with a cleanup function. It uses the default MySQL image ("mysql") with tag "8.0". For more
+// customization, use NewMySQLWithOptions.
+func NewMySQL(t testing.TB) (*sql.DB, func()) {
+	return NewMySQLWithOptions(t, nil)
+}
+
+const (
+	defaultMySQLImage = "mysql"
+	defaultMySQLTag   = "8.0"
+)
+
+// NewMySQLWithOptions starts a MySQL Docker container using Docker and returns a connected *sql.DB
+// along with a cleanup function. It applies the default settings:
+//   - Repository: "mysql"
+//   - Tag: "8.0"
+//   - Environment: MYSQL_ROOT_PASSWORD=secret, MYSQL_DATABASE=test
+//
+// Additional RunOption functions can be provided via the runOpts parameter to override these defaults,
+// and optional host configuration functions can be provided via hostOpts.
+// The DSN is generated in the format:
+//
+//	"root:<MYSQL_ROOT_PASSWORD>@tcp(<actualPort>)/<MYSQL_DATABASE>?parseTime=true".
+func NewMySQLWithOptions(t testing.TB, runOpts []RunOption, hostOpts ...func(*docker.HostConfig)) (*sql.DB, func()) {
 	// Set default run options for MySQL.
-	runOpts := &dockertest.RunOptions{
-		Repository: "mysql",
-		Tag:        tag,
+	defaultRunOpts := &dockertest.RunOptions{
+		Repository: defaultMySQLImage,
+		Tag:        defaultMySQLTag,
 		Env: []string{
 			"MYSQL_ROOT_PASSWORD=secret",
 			"MYSQL_DATABASE=test",
@@ -88,24 +109,46 @@ func NewMySQL(t testing.TB, tag string, opts ...RunOption) (*sql.DB, func()) {
 	}
 
 	// Apply any provided RunOption functions to override defaults.
-	for _, opt := range opts {
-		opt(runOpts)
+	for _, opt := range runOpts {
+		opt(defaultRunOpts)
 	}
 
-	return NewDockerDB(t, runOpts, "3306/tcp", "mysql", func(actualPort string) string {
-		return fmt.Sprintf("root:secret@tcp(%s)/test?parseTime=true", actualPort)
-	})
+	pass := getEnvValue(defaultRunOpts.Env, "MYSQL_ROOT_PASSWORD")
+	db := getEnvValue(defaultRunOpts.Env, "MYSQL_DATABASE")
+
+	return NewDockerDB(t, defaultRunOpts, "3306/tcp", "mysql", func(actualPort string) string {
+		return fmt.Sprintf("root:%s@tcp(%s)/%s?parseTime=true", pass, actualPort, db)
+	}, hostOpts...)
 }
 
-// NewPostgres starts a PostgreSQL container using Docker and returns a connected *sql.DB,
-// along with a cleanup function to remove the container after tests.
-// The 'tag' parameter specifies the PostgreSQL version to use (e.g., "13").
-// Additional RunOption functions can be provided to override default settings.
-func NewPostgres(t testing.TB, tag string, opts ...RunOption) (*sql.DB, func()) {
+const (
+	defaultPostgresImage = "postgres"
+	defaultPostgresTag   = "13"
+)
+
+// NewPostgres starts a PostgreSQL Docker container using the default settings and returns a connected *sql.DB
+// along with a cleanup function. It uses the default PostgreSQL image ("postgres") with tag "13". For more
+// customization, use NewPostgresWithOptions.
+func NewPostgres(t testing.TB) (*sql.DB, func()) {
+	return NewPostgresWithOptions(t, nil)
+}
+
+// NewPostgresWithOptions starts a PostgreSQL Docker container using Docker and returns a connected *sql.DB
+// along with a cleanup function. It applies the default settings:
+//   - Repository: "postgres"
+//   - Tag: "13"
+//   - Environment: POSTGRES_PASSWORD=secret, POSTGRES_DB=test
+//
+// Additional RunOption functions can be provided via the runOpts parameter to override these defaults,
+// and optional host configuration functions can be provided via hostOpts.
+// The DSN is generated in the format:
+//
+//	"postgres://postgres:<POSTGRES_PASSWORD>@<actualPort>/<POSTGRES_DB>?sslmode=disable".
+func NewPostgresWithOptions(t testing.TB, runOpts []RunOption, hostOpts ...func(*docker.HostConfig)) (*sql.DB, func()) {
 	// Set default run options for PostgreSQL.
-	runOpts := &dockertest.RunOptions{
-		Repository: "postgres",
-		Tag:        tag,
+	defaultRunOpts := &dockertest.RunOptions{
+		Repository: defaultPostgresImage,
+		Tag:        defaultPostgresTag,
 		Env: []string{
 			"POSTGRES_PASSWORD=secret",
 			"POSTGRES_DB=test",
@@ -113,13 +156,16 @@ func NewPostgres(t testing.TB, tag string, opts ...RunOption) (*sql.DB, func()) 
 	}
 
 	// Apply any provided RunOption functions to override defaults.
-	for _, opt := range opts {
-		opt(runOpts)
+	for _, opt := range runOpts {
+		opt(defaultRunOpts)
 	}
 
-	return NewDockerDB(t, runOpts, "5432/tcp", "postgres", func(actualPort string) string {
-		return fmt.Sprintf("postgres://postgres:secret@%s/test?sslmode=disable", actualPort)
-	})
+	pass := getEnvValue(defaultRunOpts.Env, "POSTGRES_PASSWORD")
+	db := getEnvValue(defaultRunOpts.Env, "POSTGRES_DB")
+
+	return NewDockerDB(t, defaultRunOpts, "5432/tcp", "postgres", func(actualPort string) string {
+		return fmt.Sprintf("postgres://postgres:%s@%s/%s?sslmode=disable", pass, actualPort, db)
+	}, hostOpts...)
 }
 
 // InitialDBSetup is used to set up the database before tests.
@@ -161,4 +207,16 @@ func PrepDatabase(t testing.TB, db *sql.DB, setups ...InitialDBSetup) error {
 		}
 	}
 	return nil
+}
+
+// getEnvValue searches the given slice of environment variable strings for the specified key
+// and returns its value. If the key is not found, it returns an empty string.
+func getEnvValue(env []string, key string) string {
+	prefix := key + "="
+	for _, v := range env {
+		if len(v) >= len(prefix) && v[:len(prefix)] == prefix {
+			return v[len(prefix):]
+		}
+	}
+	return ""
 }
